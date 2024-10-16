@@ -24,12 +24,17 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <cli_classic.h>
 #include "flash.h"
 #include "flashchips.h"
 #include "fmap.h"
 #include "programmer.h"
 #include "libflashrom.h"
+
+#if CONFIG_RPMC_ENABLED == 1
+#include "rpmc.h"
+#endif // CONFIG_RPMC_ENABLED
 
 enum {
 	OPTION_IFD = 0x0100,
@@ -45,6 +50,16 @@ enum {
 	OPTION_WP_DISABLE,
 	OPTION_WP_LIST,
 	OPTION_PROGRESS,
+#if CONFIG_RPMC_ENABLED == 1
+	OPTION_RPMC_READ_DATA,
+	OPTION_RPMC_WRITE_ROOT_KEY,
+	OPTION_RPMC_UPDATE_HMAC_KEY,
+	OPTION_RPMC_INCREMENT_COUNTER,
+	OPTION_RPMC_GET_COUNTER,
+    OPTION_RPMC_COUNTER_ADDRESS,
+	OPTION_RPMC_KEY_DATA,
+	OPTION_RPMC_KEY_FILE,
+#endif // CONFIG_RPMC_ENABLED
 };
 
 struct cli_options {
@@ -73,6 +88,16 @@ struct cli_options {
 	char *logfile;
 	char *referencefile;
 	const char *chip_to_probe;
+
+#if CONFIG_RPMC_ENABLED == 1
+	bool rpmc_read_data;
+	bool rpmc_write_root_key;
+	bool rpmc_update_hmac_key;
+	bool rpmc_increment_counter;
+	bool rpmc_get_counter;
+	unsigned int rpmc_counter_address;
+	uint32_t rpmc_key_data, rpmc_previous_counter_value;
+#endif // CONFIG_RPMC_ENABLED
 };
 
 static void cli_classic_usage(const char *name)
@@ -85,42 +110,52 @@ static void cli_classic_usage(const char *name)
 	       "\t\t [-n] [-N] [-f])]\n"
 	       "\t[-V[V[V]]] [-o <logfile>]\n\n", name);
 
-	printf(" -h | --help                        print this help text\n"
-	       " -R | --version                     print version (release)\n"
-	       " -r | --read <file>                 read flash and save to <file>\n"
-	       " -w | --write (<file>|-)            write <file> or the content provided\n"
-	       "                                    on the standard input to flash\n"
-	       " -v | --verify (<file>|-)           verify flash against <file>\n"
-	       "                                    or the content provided on the standard input\n"
-	       " -E | --erase                       erase flash memory\n"
-	       " -V | --verbose                     more verbose output\n"
-	       " -c | --chip <chipname>             probe only for specified flash chip\n"
-	       " -f | --force                       force specific operations (see man page)\n"
-	       " -n | --noverify                    don't auto-verify\n"
-	       " -N | --noverify-all                verify included regions only (cf. -i)\n"
-	       " -x | --extract                     extract regions to files\n"
-	       " -l | --layout <layoutfile>         read ROM layout from <layoutfile>\n"
-	       "      --wp-disable                  disable write protection\n"
-	       "      --wp-enable                   enable write protection\n"
-	       "      --wp-list                     list supported write protection ranges\n"
-	       "      --wp-status                   show write protection status\n"
-	       "      --wp-range=<start>,<len>      set write protection range (use --wp-range=0,0\n"
-	       "                                    to unprotect the entire flash)\n"
-	       "      --wp-region <region>          set write protection region\n"
-	       "      --flash-name                  read out the detected flash name\n"
-	       "      --flash-size                  read out the detected flash size\n"
-	       "      --fmap                        read ROM layout from fmap embedded in ROM\n"
-	       "      --fmap-file <fmapfile>        read ROM layout from fmap in <fmapfile>\n"
-	       "      --ifd                         read layout from an Intel Firmware Descriptor\n"
-	       " -i | --include <region>[:<file>]   only read/write image <region> from layout\n"
-	       "                                    (optionally with data from <file>)\n"
-	       "      --image <region>[:<file>]     deprecated, please use --include\n"
-	       " -o | --output <logfile>            log output to <logfile>\n"
-	       "      --flash-contents <ref-file>   assume flash contents to be <ref-file>\n"
-	       " -L | --list-supported              print supported devices\n"
-	       "      --progress                    show progress percentage on the standard output\n"
+	printf(" -h | --help                        		print this help text\n"
+	       " -R | --version                     		print version (release)\n"
+	       " -r | --read <file>                 		read flash and save to <file>\n"
+	       " -w | --write (<file>|-)            		write <file> or the content provided\n"
+	       "                                    		on the standard input to flash\n"
+	       " -v | --verify (<file>|-)           		verify flash against <file>\n"
+	       "                                    		or the content provided on the standard input\n"
+	       " -E | --erase                       		erase flash memory\n"
+	       " -V | --verbose                     		more verbose output\n"
+	       " -c | --chip <chipname>             		probe only for specified flash chip\n"
+	       " -f | --force                       		force specific operations (see man page)\n"
+	       " -n | --noverify                    		don't auto-verify\n"
+	       " -N | --noverify-all                		verify included regions only (cf. -i)\n"
+	       " -x | --extract                     		extract regions to files\n"
+	       " -l | --layout <layoutfile>         		read ROM layout from <layoutfile>\n"
+	       "      --wp-disable                  		disable write protection\n"
+	       "      --wp-enable                   		enable write protection\n"
+	       "      --wp-list                     		list supported write protection ranges\n"
+	       "      --wp-status                   		show write protection status\n"
+	       "      --wp-range=<start>,<len>      		set write protection range (use --wp-range=0,0\n"
+	       "                                    		to unprotect the entire flash)\n"
+	       "      --wp-region <region>          		set write protection region\n"
+	       "      --flash-name                  		read out the detected flash name\n"
+	       "      --flash-size                  		read out the detected flash size\n"
+	       "      --fmap                        		read ROM layout from fmap embedded in ROM\n"
+	       "      --fmap-file <fmapfile>        		read ROM layout from fmap in <fmapfile>\n"
+	       "      --ifd                         		read layout from an Intel Firmware Descriptor\n"
+	       " -i | --include <region>[:<file>]   		only read/write image <region> from layout\n"
+	       "                                    		(optionally with data from <file>)\n"
+	       "      --image <region>[:<file>]     		deprecated, please use --include\n"
+	       " -o | --output <logfile>            		log output to <logfile>\n"
+	       "      --flash-contents <ref-file>   		assume flash contents to be <ref-file>\n"
+	       " -L | --list-supported              		print supported devices\n"
+	       "      --progress                    		show progress percentage on the standard output\n"
+#if CONFIG_RPMC_ENABLED == 1
+		   "      --get-rpmc-status                     read the extended status\n"
+           "      --write-root-key                      write the root key register for specified counter address\n"         
+           "      --update-hmac-key                     update the hmac key register, with the data from --key-data for specified counter address\n"
+           "      --increment-counter <previous>        increment rpmc counter\n"
+           "      --get-counter                         get counter\n"
+           "      --counter-address <number>            specify counter address\n"
+           "      --rpmc-root-key <keyfile>             rpmc root key file\n"
+           "      --key-data <keydata>                  hex number representing the current key data value to use\n"
+#endif // CONFIG_RPMC_ENABLED
 	       " -p | --programmer <name>[:<param>] specify the programmer device. One of\n");
-	list_programmers_linebreak(4, 80, 0);
+	list_programmers_linebreak(4, 80, 0);	   
 	printf(".\n\nYou can specify one of -h, -R, -L, "
 	         "-E, -r, -w, -v or no operation.\n"
 	       "If no operation is specified, flashrom will only probe for flash chips.\n");
@@ -810,6 +845,38 @@ static void parse_options(int argc, char **argv, const char *optstring,
 		case OPTION_PROGRESS:
 			options->show_progress = true;
 			break;
+#if CONFIG_RPMC_ENABLED == 1
+		case OPTION_RPMC_READ_DATA:
+			cli_classic_validate_singleop(&operation_specified);
+			options->rpmc_read_data = true;
+			break;
+        case OPTION_RPMC_WRITE_ROOT_KEY:
+            cli_classic_validate_singleop(&operation_specified);
+            options->rpmc_write_root_key = true;
+            break;
+        case OPTION_RPMC_UPDATE_HMAC_KEY:
+            cli_classic_validate_singleop(&operation_specified);
+            options->rpmc_update_hmac_key = true;
+            break;
+        case OPTION_RPMC_INCREMENT_COUNTER:
+            cli_classic_validate_singleop(&operation_specified);
+            options->rpmc_increment_counter = true;
+			options->rpmc_previous_counter_value = strtoumax(optarg, NULL, 10);
+            break;
+        case OPTION_RPMC_GET_COUNTER:
+            cli_classic_validate_singleop(&operation_specified);
+            options->rpmc_get_counter = true;
+            break;
+        case OPTION_RPMC_COUNTER_ADDRESS:
+            options->rpmc_counter_address = strtoumax(optarg, NULL, 10);
+            break;
+		case OPTION_RPMC_KEY_DATA:
+			options->rpmc_key_data = strtoumax(optarg, NULL, 16);
+			break;
+		case OPTION_RPMC_KEY_FILE:
+			options->filename = strdup(optarg);
+			break;
+#endif // CONFIG_RPMC_ENABLED
 		default:
 			cli_classic_abort_usage(NULL);
 			break;
@@ -847,39 +914,49 @@ int main(int argc, char *argv[])
 	struct cli_options options = { 0 };
 	static const char optstring[] = "r:Rw:v:nNVEfc:l:i:p:Lzho:x";
 	static const struct option long_options[] = {
-		{"read",		1, NULL, 'r'},
-		{"write",		1, NULL, 'w'},
-		{"erase",		0, NULL, 'E'},
-		{"verify",		1, NULL, 'v'},
-		{"noverify",		0, NULL, 'n'},
-		{"noverify-all",	0, NULL, 'N'},
-		{"extract",		0, NULL, 'x'},
-		{"chip",		1, NULL, 'c'},
-		{"verbose",		0, NULL, 'V'},
-		{"force",		0, NULL, 'f'},
-		{"layout",		1, NULL, 'l'},
-		{"ifd",			0, NULL, OPTION_IFD},
-		{"fmap",		0, NULL, OPTION_FMAP},
-		{"fmap-file",		1, NULL, OPTION_FMAP_FILE},
-		{"image",		1, NULL, 'i'}, // (deprecated): back compatibility.
-		{"include",		1, NULL, 'i'},
-		{"flash-contents",	1, NULL, OPTION_FLASH_CONTENTS},
-		{"flash-name",		0, NULL, OPTION_FLASH_NAME},
-		{"flash-size",		0, NULL, OPTION_FLASH_SIZE},
-		{"get-size",		0, NULL, OPTION_FLASH_SIZE}, // (deprecated): back compatibility.
-		{"wp-status",		0, NULL, OPTION_WP_STATUS},
-		{"wp-list",		0, NULL, OPTION_WP_LIST},
-		{"wp-range",		1, NULL, OPTION_WP_SET_RANGE},
-		{"wp-region",		1, NULL, OPTION_WP_SET_REGION},
-		{"wp-enable",		0, NULL, OPTION_WP_ENABLE},
-		{"wp-disable",		0, NULL, OPTION_WP_DISABLE},
-		{"list-supported",	0, NULL, 'L'},
-		{"programmer",		1, NULL, 'p'},
-		{"help",		0, NULL, 'h'},
-		{"version",		0, NULL, 'R'},
-		{"output",		1, NULL, 'o'},
-		{"progress",		0, NULL, OPTION_PROGRESS},
-		{NULL,			0, NULL, 0},
+		{"read",			    1, 	NULL, 	'r'},
+		{"write",			    1, 	NULL, 	'w'},
+		{"erase",			    0, 	NULL, 	'E'},
+		{"verify",			    1, 	NULL, 	'v'},
+		{"noverify",		    0, 	NULL, 	'n'},
+		{"noverify-all",	    0, 	NULL, 	'N'},
+		{"extract",			    0, 	NULL, 	'x'},
+		{"chip",			    1, 	NULL, 	'c'},
+		{"verbose",			    0, 	NULL, 	'V'},
+		{"force",			    0, 	NULL, 	'f'},
+		{"layout",			    1, 	NULL, 	'l'},
+		{"ifd",				    0, 	NULL, 	OPTION_IFD},
+		{"fmap",			    0, 	NULL, 	OPTION_FMAP},
+		{"fmap-file",		    1, 	NULL, 	OPTION_FMAP_FILE},
+		{"image",			    1, 	NULL, 	'i'}, // (deprecated): back compatibility.
+		{"include",			    1, 	NULL, 	'i'},
+		{"flash-contents",	    1, 	NULL, 	OPTION_FLASH_CONTENTS},
+		{"flash-name",		    0, 	NULL, 	OPTION_FLASH_NAME},
+		{"flash-size",		    0, 	NULL, 	OPTION_FLASH_SIZE},
+		{"get-size",		    0, 	NULL, 	OPTION_FLASH_SIZE}, // (deprecated): back compatibility.
+		{"wp-status",		    0, 	NULL, 	OPTION_WP_STATUS},
+		{"wp-list",			    0, 	NULL, 	OPTION_WP_LIST},
+		{"wp-range",		    1,	NULL, 	OPTION_WP_SET_RANGE},
+		{"wp-region",		    1,	NULL, 	OPTION_WP_SET_REGION},
+		{"wp-enable",		    0,	NULL, 	OPTION_WP_ENABLE},
+		{"wp-disable",		    0,	NULL, 	OPTION_WP_DISABLE},
+		{"list-supported",	    0,	NULL, 	'L'},
+		{"programmer",		    1,	NULL, 	'p'},
+		{"help",			    0,	NULL, 	'h'},
+		{"version",			    0,	NULL, 	'R'},
+		{"output",			    1,	NULL, 	'o'},
+		{"progress",		    0,	NULL, 	OPTION_PROGRESS},
+#if CONFIG_RPMC_ENABLED == 1
+		{"get-rpmc-status",	    0,	NULL,	OPTION_RPMC_READ_DATA},
+        {"write-root-key",      0,  NULL,   OPTION_RPMC_WRITE_ROOT_KEY},
+        {"update-hmac-key",     0,  NULL,   OPTION_RPMC_UPDATE_HMAC_KEY},
+        {"increment-counter",   1,  NULL,   OPTION_RPMC_INCREMENT_COUNTER},
+        {"get-counter",         0,  NULL,   OPTION_RPMC_GET_COUNTER},
+        {"counter-address",     1,  NULL,   OPTION_RPMC_COUNTER_ADDRESS},
+		{"key-data",			1,	NULL,	OPTION_RPMC_KEY_DATA},
+		{"rpmc-root-key",		1,	NULL,	OPTION_RPMC_KEY_FILE},
+#endif // CONFIG_RPMC_ENABLED
+		{NULL,				    0,	NULL, 	0},
 	};
 
 	/*
@@ -1089,9 +1166,17 @@ int main(int argc, char *argv[])
 		options.set_wp_range || options.set_wp_region || options.enable_wp ||
 		options.disable_wp || options.print_wp_status || options.print_wp_ranges;
 
+    const bool any_rpmc_op = 
+#if CONFIG_RPMC_ENABLED == 1
+        options.rpmc_read_data || options.rpmc_write_root_key || options.rpmc_update_hmac_key ||
+        options.rpmc_increment_counter || options.rpmc_get_counter;
+#else
+		false;
+#endif // CONFIG_RPMC_ENABLED
+
 	const bool any_op = options.read_it || options.write_it || options.verify_it ||
 		options.erase_it || options.flash_name || options.flash_size ||
-		options.extract_it || any_wp_op;
+		options.extract_it || any_wp_op || any_rpmc_op;
 
 	if (!any_op) {
 		msg_ginfo("No operations were specified.\n");
@@ -1226,6 +1311,19 @@ int main(int argc, char *argv[])
 		ret = do_write(fill_flash, options.filename, options.referencefile);
 	else if (options.verify_it)
 		ret = do_verify(fill_flash, options.filename);
+
+#if CONFIG_RPMC_ENABLED == 1
+    if (options.rpmc_read_data)
+		ret = rpmc_read_data(fill_flash);
+    else if (options.rpmc_write_root_key)
+        ret = rpmc_write_root_key(fill_flash, options.filename, options.rpmc_counter_address);
+    else if (options.rpmc_update_hmac_key) {
+		ret = rpmc_update_hmac_key(fill_flash, options.filename, options.rpmc_key_data, options.rpmc_counter_address);
+	} else if (options.rpmc_increment_counter)
+        ret = rpmc_increment_counter(fill_flash, options.filename, options.rpmc_key_data, options.rpmc_counter_address, options.rpmc_previous_counter_value);
+    else if (options.rpmc_get_counter)
+        ret = rpmc_get_monotonic_counter(fill_flash, options.filename, options.rpmc_key_data, options.rpmc_counter_address);
+#endif // CONFIG_RPMC_ENABLED
 
 out_release:
 	flashrom_layout_release(options.layout);

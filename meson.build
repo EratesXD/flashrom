@@ -164,12 +164,21 @@ libpci     = dependency('libpci', required : group_pci, version : '>=2.2.0',
 libusb1    = dependency('libusb-1.0', required : group_usb)
 libftdi1   = dependency('libftdi1', required : group_ftdi)
 libjaylink = dependency('libjaylink', required : group_jlink, version : '>=0.3.0')
+libcrypto = dependency('libcrypto', required : false, version : '>=3.0.0')
 
 # ECAM is supported in libpci after 3.13.0
 if libpci.version().version_compare('>=3.13.0')
     add_project_arguments('-DCONFIG_USE_LIBPCI_ECAM=1', language: 'c')
 else
     add_project_arguments('-DCONFIG_USE_LIBPCI_ECAM=0', language: 'c')
+endif
+
+# Support additional rpmc commands if libcrypto is installed
+if libcrypto.found()
+    message('found libcrypto dependency rpmc features enabled')
+    add_project_arguments('-DCONFIG_RPMC_ENABLED=1', language : 'c')
+    deps += libcrypto
+    srcs += 'rpmc.c'
 endif
 
 if host_machine.system() == 'windows'
