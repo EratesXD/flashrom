@@ -56,7 +56,7 @@ enum {
 	OPTION_RPMC_UPDATE_HMAC_KEY,
 	OPTION_RPMC_INCREMENT_COUNTER,
 	OPTION_RPMC_GET_COUNTER,
-    OPTION_RPMC_COUNTER_ADDRESS,
+	OPTION_RPMC_COUNTER_ADDRESS,
 	OPTION_RPMC_KEY_DATA,
 	OPTION_RPMC_KEY_FILE,
 #endif // CONFIG_RPMC_ENABLED
@@ -145,17 +145,17 @@ static void cli_classic_usage(const char *name)
 	       " -L | --list-supported              		print supported devices\n"
 	       "      --progress                    		show progress percentage on the standard output\n"
 #if CONFIG_RPMC_ENABLED == 1
-		   "      --get-rpmc-status                     read the extended status\n"
-           "      --write-root-key                      write the root key register for specified counter address\n"         
-           "      --update-hmac-key                     update the hmac key register, with the data from --key-data for specified counter address\n"
-           "      --increment-counter <previous>        increment rpmc counter\n"
-           "      --get-counter                         get counter\n"
-           "      --counter-address <number>            specify counter address\n"
-           "      --rpmc-root-key <keyfile>             rpmc root key file\n"
-           "      --key-data <keydata>                  hex number representing the current key data value to use\n"
+	       "      --get-rpmc-status                     read the extended status\n"
+	       "      --write-root-key                      write the root key register for specified counter address\n"
+	       "      --update-hmac-key                     update the hmac key register, with the data from --key-data for specified counter address\n"
+	       "      --increment-counter <previous>        increment rpmc counter\n"
+	       "      --get-counter                         get counter\n"
+	       "      --counter-address <number>            specify counter address (default: 0)\n"
+	       "      --rpmc-root-key <keyfile>             rpmc root key file\n"
+	       "      --key-data <keydata>                  hex number representing the current key data value to use (default: 0)\n"
 #endif // CONFIG_RPMC_ENABLED
 	       " -p | --programmer <name>[:<param>] specify the programmer device. One of\n");
-	list_programmers_linebreak(4, 80, 0);	   
+	list_programmers_linebreak(4, 80, 0);
 	printf(".\n\nYou can specify one of -h, -R, -L, "
 	         "-E, -r, -w, -v or no operation.\n"
 	       "If no operation is specified, flashrom will only probe for flash chips.\n");
@@ -850,26 +850,26 @@ static void parse_options(int argc, char **argv, const char *optstring,
 			cli_classic_validate_singleop(&operation_specified);
 			options->rpmc_read_data = true;
 			break;
-        case OPTION_RPMC_WRITE_ROOT_KEY:
-            cli_classic_validate_singleop(&operation_specified);
-            options->rpmc_write_root_key = true;
-            break;
-        case OPTION_RPMC_UPDATE_HMAC_KEY:
-            cli_classic_validate_singleop(&operation_specified);
-            options->rpmc_update_hmac_key = true;
-            break;
-        case OPTION_RPMC_INCREMENT_COUNTER:
-            cli_classic_validate_singleop(&operation_specified);
-            options->rpmc_increment_counter = true;
+		case OPTION_RPMC_WRITE_ROOT_KEY:
+			cli_classic_validate_singleop(&operation_specified);
+			options->rpmc_write_root_key = true;
+			break;
+		case OPTION_RPMC_UPDATE_HMAC_KEY:
+			cli_classic_validate_singleop(&operation_specified);
+			options->rpmc_update_hmac_key = true;
+			break;
+		case OPTION_RPMC_INCREMENT_COUNTER:
+			cli_classic_validate_singleop(&operation_specified);
+			options->rpmc_increment_counter = true;
 			options->rpmc_previous_counter_value = strtoumax(optarg, NULL, 10);
-            break;
-        case OPTION_RPMC_GET_COUNTER:
-            cli_classic_validate_singleop(&operation_specified);
-            options->rpmc_get_counter = true;
-            break;
-        case OPTION_RPMC_COUNTER_ADDRESS:
-            options->rpmc_counter_address = strtoumax(optarg, NULL, 10);
-            break;
+			break;
+		case OPTION_RPMC_GET_COUNTER:
+			cli_classic_validate_singleop(&operation_specified);
+			options->rpmc_get_counter = true;
+			break;
+		case OPTION_RPMC_COUNTER_ADDRESS:
+			options->rpmc_counter_address = strtoumax(optarg, NULL, 10);
+			break;
 		case OPTION_RPMC_KEY_DATA:
 			options->rpmc_key_data = strtoumax(optarg, NULL, 16);
 			break;
@@ -914,49 +914,49 @@ int main(int argc, char *argv[])
 	struct cli_options options = { 0 };
 	static const char optstring[] = "r:Rw:v:nNVEfc:l:i:p:Lzho:x";
 	static const struct option long_options[] = {
-		{"read",			    1, 	NULL, 	'r'},
-		{"write",			    1, 	NULL, 	'w'},
-		{"erase",			    0, 	NULL, 	'E'},
-		{"verify",			    1, 	NULL, 	'v'},
-		{"noverify",		    0, 	NULL, 	'n'},
-		{"noverify-all",	    0, 	NULL, 	'N'},
-		{"extract",			    0, 	NULL, 	'x'},
-		{"chip",			    1, 	NULL, 	'c'},
-		{"verbose",			    0, 	NULL, 	'V'},
-		{"force",			    0, 	NULL, 	'f'},
-		{"layout",			    1, 	NULL, 	'l'},
-		{"ifd",				    0, 	NULL, 	OPTION_IFD},
-		{"fmap",			    0, 	NULL, 	OPTION_FMAP},
-		{"fmap-file",		    1, 	NULL, 	OPTION_FMAP_FILE},
-		{"image",			    1, 	NULL, 	'i'}, // (deprecated): back compatibility.
-		{"include",			    1, 	NULL, 	'i'},
-		{"flash-contents",	    1, 	NULL, 	OPTION_FLASH_CONTENTS},
-		{"flash-name",		    0, 	NULL, 	OPTION_FLASH_NAME},
-		{"flash-size",		    0, 	NULL, 	OPTION_FLASH_SIZE},
-		{"get-size",		    0, 	NULL, 	OPTION_FLASH_SIZE}, // (deprecated): back compatibility.
-		{"wp-status",		    0, 	NULL, 	OPTION_WP_STATUS},
-		{"wp-list",			    0, 	NULL, 	OPTION_WP_LIST},
-		{"wp-range",		    1,	NULL, 	OPTION_WP_SET_RANGE},
-		{"wp-region",		    1,	NULL, 	OPTION_WP_SET_REGION},
-		{"wp-enable",		    0,	NULL, 	OPTION_WP_ENABLE},
-		{"wp-disable",		    0,	NULL, 	OPTION_WP_DISABLE},
-		{"list-supported",	    0,	NULL, 	'L'},
-		{"programmer",		    1,	NULL, 	'p'},
-		{"help",			    0,	NULL, 	'h'},
-		{"version",			    0,	NULL, 	'R'},
-		{"output",			    1,	NULL, 	'o'},
-		{"progress",		    0,	NULL, 	OPTION_PROGRESS},
+		{"read",				1, 	NULL, 	'r'},
+		{"write",				1, 	NULL, 	'w'},
+		{"erase",				0, 	NULL, 	'E'},
+		{"verify",				1, 	NULL, 	'v'},
+		{"noverify",			0, 	NULL, 	'n'},
+		{"noverify-all",		0, 	NULL, 	'N'},
+		{"extract",				0, 	NULL, 	'x'},
+		{"chip",				1, 	NULL, 	'c'},
+		{"verbose",				0, 	NULL, 	'V'},
+		{"force",				0, 	NULL, 	'f'},
+		{"layout",				1, 	NULL, 	'l'},
+		{"ifd",					0, 	NULL, 	OPTION_IFD},
+		{"fmap",				0, 	NULL, 	OPTION_FMAP},
+		{"fmap-file",			1, 	NULL, 	OPTION_FMAP_FILE},
+		{"image",				1, 	NULL, 	'i'}, // (deprecated): back compatibility.
+		{"include",				1, 	NULL, 	'i'},
+		{"flash-contents",		1, 	NULL, 	OPTION_FLASH_CONTENTS},
+		{"flash-name",			0, 	NULL, 	OPTION_FLASH_NAME},
+		{"flash-size",			0, 	NULL, 	OPTION_FLASH_SIZE},
+		{"get-size",			0, 	NULL, 	OPTION_FLASH_SIZE}, // (deprecated): back compatibility.
+		{"wp-status",			0, 	NULL, 	OPTION_WP_STATUS},
+		{"wp-list",				0, 	NULL, 	OPTION_WP_LIST},
+		{"wp-range",			1,	NULL, 	OPTION_WP_SET_RANGE},
+		{"wp-region",			1,	NULL, 	OPTION_WP_SET_REGION},
+		{"wp-enable",			0,	NULL, 	OPTION_WP_ENABLE},
+		{"wp-disable",			0,	NULL, 	OPTION_WP_DISABLE},
+		{"list-supported",		0,	NULL, 	'L'},
+		{"programmer",			1,	NULL, 	'p'},
+		{"help",				0,	NULL, 	'h'},
+		{"version",				0,	NULL, 	'R'},
+		{"output",				1,	NULL, 	'o'},
+		{"progress",			0,	NULL, 	OPTION_PROGRESS},
 #if CONFIG_RPMC_ENABLED == 1
-		{"get-rpmc-status",	    0,	NULL,	OPTION_RPMC_READ_DATA},
-        {"write-root-key",      0,  NULL,   OPTION_RPMC_WRITE_ROOT_KEY},
-        {"update-hmac-key",     0,  NULL,   OPTION_RPMC_UPDATE_HMAC_KEY},
-        {"increment-counter",   1,  NULL,   OPTION_RPMC_INCREMENT_COUNTER},
-        {"get-counter",         0,  NULL,   OPTION_RPMC_GET_COUNTER},
-        {"counter-address",     1,  NULL,   OPTION_RPMC_COUNTER_ADDRESS},
+		{"get-rpmc-status",		0,	NULL,	OPTION_RPMC_READ_DATA},
+		{"write-root-key",		0,	NULL,	OPTION_RPMC_WRITE_ROOT_KEY},
+		{"update-hmac-key",		0,	NULL,	OPTION_RPMC_UPDATE_HMAC_KEY},
+		{"increment-counter",	1,	NULL,	OPTION_RPMC_INCREMENT_COUNTER},
+		{"get-counter",			0,	NULL,	OPTION_RPMC_GET_COUNTER},
+		{"counter-address",		1,	NULL,	OPTION_RPMC_COUNTER_ADDRESS},
 		{"key-data",			1,	NULL,	OPTION_RPMC_KEY_DATA},
 		{"rpmc-root-key",		1,	NULL,	OPTION_RPMC_KEY_FILE},
 #endif // CONFIG_RPMC_ENABLED
-		{NULL,				    0,	NULL, 	0},
+		{NULL,					0,	NULL, 	0},
 	};
 
 	/*
@@ -1166,10 +1166,10 @@ int main(int argc, char *argv[])
 		options.set_wp_range || options.set_wp_region || options.enable_wp ||
 		options.disable_wp || options.print_wp_status || options.print_wp_ranges;
 
-    const bool any_rpmc_op = 
+	const bool any_rpmc_op = 
 #if CONFIG_RPMC_ENABLED == 1
-        options.rpmc_read_data || options.rpmc_write_root_key || options.rpmc_update_hmac_key ||
-        options.rpmc_increment_counter || options.rpmc_get_counter;
+		options.rpmc_read_data || options.rpmc_write_root_key || options.rpmc_update_hmac_key ||
+		options.rpmc_increment_counter || options.rpmc_get_counter;
 #else
 		false;
 #endif // CONFIG_RPMC_ENABLED
@@ -1236,7 +1236,7 @@ int main(int argc, char *argv[])
 		}
 
 		if (flashrom_layout_read_fmap_from_buffer(&options.layout, fill_flash, fmapfile_buffer, fmapfile_size) ||
-		    process_include_args(options.layout, options.include_args)) {
+			process_include_args(options.layout, options.include_args)) {
 			ret = 1;
 			free(fmapfile_buffer);
 			goto out_shutdown;
@@ -1313,16 +1313,16 @@ int main(int argc, char *argv[])
 		ret = do_verify(fill_flash, options.filename);
 
 #if CONFIG_RPMC_ENABLED == 1
-    if (options.rpmc_read_data)
+	if (options.rpmc_read_data)
 		ret = rpmc_read_data(fill_flash);
-    else if (options.rpmc_write_root_key)
-        ret = rpmc_write_root_key(fill_flash, options.filename, options.rpmc_counter_address);
-    else if (options.rpmc_update_hmac_key) {
+	else if (options.rpmc_write_root_key)
+		ret = rpmc_write_root_key(fill_flash, options.filename, options.rpmc_counter_address);
+	else if (options.rpmc_update_hmac_key) {
 		ret = rpmc_update_hmac_key(fill_flash, options.filename, options.rpmc_key_data, options.rpmc_counter_address);
 	} else if (options.rpmc_increment_counter)
-        ret = rpmc_increment_counter(fill_flash, options.filename, options.rpmc_key_data, options.rpmc_counter_address, options.rpmc_previous_counter_value);
-    else if (options.rpmc_get_counter)
-        ret = rpmc_get_monotonic_counter(fill_flash, options.filename, options.rpmc_key_data, options.rpmc_counter_address);
+		ret = rpmc_increment_counter(fill_flash, options.filename, options.rpmc_key_data, options.rpmc_counter_address, options.rpmc_previous_counter_value);
+	else if (options.rpmc_get_counter)
+		ret = rpmc_get_monotonic_counter(fill_flash, options.filename, options.rpmc_key_data, options.rpmc_counter_address);
 #endif // CONFIG_RPMC_ENABLED
 
 out_release:

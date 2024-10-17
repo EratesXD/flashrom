@@ -24,20 +24,24 @@
 #include <openssl/rand.h>
 #include <string.h>
 
+#define RPMC_OP1_MSG_HEADER_LENGTH 4
 #define RPMC_SIGNATURE_LENGTH 32
 #define RPMC_COUNTER_LENGTH 4
 #define RPMC_KEY_DATA_LENGTH 4
 #define RPMC_TAG_LENGTH 12
 #define RPMC_HMAC_KEY_LENGTH 32
 #define RPMC_TRUNCATED_SIG_LENGTH 28
-#define RPMC_TAG_LENGTH 12
 
-#define RPMC_READ_DATA_ANSWER_LENGTH (1 + RPMC_TAG_LENGTH + RPMC_COUNTER_LENGTH + RPMC_SIGNATURE_LENGTH)
-#define RPMC_WRITE_ROOT_KEY_MSG_LENGTH 64
-#define RPMC_UPDATE_HMAC_KEY_MSG_LENGTH 40
-#define RPMC_INCREMENT_MONOTONIC_COUNTER_MSG_LENGTH 40
-#define RPMC_GET_MONOTONIC_COUNTER_MSG_LENGTH 48
+// OP1 commands
+#define RPMC_WRITE_ROOT_KEY_MSG_LENGTH (RPMC_OP1_MSG_HEADER_LENGTH + RPMC_HMAC_KEY_LENGTH + RPMC_TRUNCATED_SIG_LENGTH)
+#define RPMC_UPDATE_HMAC_KEY_MSG_LENGTH (RPMC_OP1_MSG_HEADER_LENGTH + RPMC_KEY_DATA_LENGTH + RPMC_SIGNATURE_LENGTH)
+#define RPMC_INCREMENT_MONOTONIC_COUNTER_MSG_LENGTH (RPMC_OP1_MSG_HEADER_LENGTH + RPMC_COUNTER_LENGTH + RPMC_SIGNATURE_LENGTH)
+#define RPMC_GET_MONOTONIC_COUNTER_MSG_LENGTH (RPMC_OP1_MSG_HEADER_LENGTH + RPMC_TAG_LENGTH + RPMC_SIGNATURE_LENGTH)
+
+// OP2 commands
 #define RPMC_READ_DATA_MSG_LENGTH 2
+#define RPMC_READ_DATA_ANSWER_LENGTH (1 + RPMC_TAG_LENGTH + RPMC_COUNTER_LENGTH + RPMC_SIGNATURE_LENGTH)
+
 
 struct rpmc_status_register {
     uint8_t status;
@@ -45,15 +49,6 @@ struct rpmc_status_register {
     uint32_t counter_data;
     unsigned char signature[RPMC_SIGNATURE_LENGTH];
 };
-
-static int check_counter_in_range(struct flashrom_flashctx * flash, const unsigned int counter_address) {
-    if (counter_address >= flash->chip->rpmc_ctx.num_counters) {
-        msg_gerr("Counter address is not in range, should be between 0 and %d.\n", flash->chip->rpmc_ctx.num_counters - 1);
-        return 1;
-    }
-
-    return 0;
-}
 
 static uint8_t get_extended_status(struct flashrom_flashctx * flash)
 {
@@ -71,7 +66,11 @@ static uint8_t get_extended_status(struct flashrom_flashctx * flash)
     return status;
 }
 
-static int get_extended_status_long(struct flashrom_flashctx * flash, struct rpmc_status_register * status)
+static int get_extended_status_long(struct flashrom_flashctx * flash,
+                                    struct rpmc_status_register * status,
+                                    // optional to check values tag and signature against
+                                    const unsigned char * const tag,
+                                    const unsigned char * const key)
 {
     const unsigned int tag_offset = 1;
     const unsigned int counter_data_offset = tag_offset + RPMC_TAG_LENGTH;
@@ -93,14 +92,31 @@ static int get_extended_status_long(struct flashrom_flashctx * flash, struct rpm
     memcpy(status->tag, answer + tag_offset, RPMC_TAG_LENGTH);
 
     status->counter_data = answer[counter_data_offset];
-
     status->counter_data = (status->counter_data << 8) | answer[counter_data_offset + 1];
     status->counter_data = (status->counter_data << 8) | answer[counter_data_offset + 2];
     status->counter_data = (status->counter_data << 8) | answer[counter_data_offset + 3];
 
     memcpy(status->signature, answer + signature_offset, RPMC_SIGNATURE_LENGTH);
 
-    return 0;
+    if (tag != NULL) {
+        if (memcmp(tag, status->tag, RPMC_TAG_LENGTH) != 0) {
+            msg_gwarn("Tag doesn't match counter might be false\n");
+            ret = 1;
+        }
+    }
+
+    if (key != NULL) {
+        unsigned char * signature = HMAC(EVP_sha256(), key, RPMC_HMAC_KEY_LENGTH, answer + tag_offset, signature_offset - tag_offset, NULL, NULL);
+        if (signature == NULL) {
+            msg_gerr("Could not generate signature\n");
+            ret = 1;
+        } else if (memcmp(signature, status->signature, RPMC_SIGNATURE_LENGTH) != 0) {
+            msg_gerr("Signature doesn't match\n");
+            ret = 1;
+        }
+    }
+
+    return ret;
 }
 
 static int poll_until_finished(struct flashrom_flashctx * flash)
@@ -160,41 +176,52 @@ static int calculate_hmac_key_register(const char * const keyfile, const uint32_
     return 0;
 }
 
-int rpmc_write_root_key(struct flashrom_flashctx * flash, const char * const keyfile, const unsigned int counter_address)
+static int basic_checks(struct flashrom_flashctx * flash, const unsigned int counter_address)
 {
-    const unsigned int key_offset = 4;
-    const unsigned int signature_cutoff = RPMC_SIGNATURE_LENGTH - RPMC_TRUNCATED_SIG_LENGTH;
-    unsigned char msg[RPMC_WRITE_ROOT_KEY_MSG_LENGTH];
-    msg[0] = flash->chip->rpmc_ctx.op1_opcode; // Opcode
-    msg[1] = 0x00; // CmdType
-    msg[2] = counter_address; // CounterAddr
-    msg[3] = 0; // Reserved
-
     if ((flash->chip->feature_bits & FEATURE_FLASH_HARDENING) == 0) {
-        msg_gerr("Flash hardening is not supported on this chip, aborting writing root key\n");
+        msg_gerr("Flash hardening is not supported on this chip, aborting.\n");
         return 1;
     }
 
-    if (check_counter_in_range(flash, counter_address) != 0) {
+    if (counter_address >= flash->chip->rpmc_ctx.num_counters) {
+        msg_gerr("Counter address is not in range, should be between 0 and %d.\n", flash->chip->rpmc_ctx.num_counters - 1);
         return 1;
     }
 
-    if (keyfile == NULL || read_buf_from_file(msg + key_offset, RPMC_HMAC_KEY_LENGTH, keyfile) != 0) {
-        return 1;
+    return 0;
+}
+
+static int check_errors(const uint8_t status, const unsigned int command)
+{
+    
+    if (status == 0x80) {
+        return 0;
     }
 
-    unsigned char * signature = HMAC(EVP_sha256(), msg + key_offset, RPMC_HMAC_KEY_LENGTH, msg, 4, NULL, NULL);
-
-    if (signature == NULL) {
-        msg_gerr("Could not calculate HMAC signature for message\n");
-        return 1;
+    if (status & (1 << 4)) {
+        msg_gerr("Previous counter value does not match.\n");
+    } else if (status & (1 << 3)) {
+        msg_gerr("Hmac key register is uninitialized.\n");
+    } else if (status & (1 << 1)) {
+        switch(command) {
+            case 0x0:
+                msg_gerr("Either Root Key Register Overwrite, Counter Address out of range or truncated signature mismatch.\n");
+                break;
+            case 0x1:
+                msg_gerr("Counter is not initialized.\n");
+                break;
+        }
+    } else if (status & (1 << 2)) {
+        msg_gerr("Payload size incorrect, counter address out of range, commandtype out of range or signature mismatch.\n");
     }
 
-    // need to truncate the signature a bit
-    memcpy(msg + 4 + RPMC_HMAC_KEY_LENGTH, signature + signature_cutoff, RPMC_TRUNCATED_SIG_LENGTH);
+    return 1;
+}
 
-    msg_gspew("Sending write root key command\n");
-    int ret = spi_send_command(flash, RPMC_WRITE_ROOT_KEY_MSG_LENGTH, 0, msg, NULL);
+static int send_and_wait(struct flashrom_flashctx * flash, const unsigned char * const msg, const size_t length)
+{
+    msg_gdbg("sending rpmc command\n");
+    int ret = spi_send_command(flash, length, 0, msg, NULL);
     if (ret)
         return ret;
 
@@ -202,27 +229,86 @@ int rpmc_write_root_key(struct flashrom_flashctx * flash, const char * const key
     ret = poll_until_finished(flash);
     if (ret)
         return ret;
+    
+    msg_gdbg("done sending rpmc command\n");
+    
+    return 0;
+}
 
-    uint8_t status = get_extended_status(flash);
-    if (status != 0x80) {
-        ret = 1;
-
-        if (status & (1 << 1))
-            msg_gerr("Either Root Key Register Overwrite, Counter Address out of range or truncated signature mismatch.\n");
-        else if (status & (1 << 2))
-            msg_gerr("Payload size was incorrect.\n");
-    } else {
-        msg_ginfo("Successfully wrote new root key for counter %u.\n", counter_address);
+static int sign_send_wait_check(struct flashrom_flashctx * flash,
+                                unsigned char * const msg,
+                                const size_t msg_length, 
+                                const size_t signature_offset, 
+                                const char * const keyfile, 
+                                const uint32_t key_data) 
+{
+    unsigned char hmac_key_register[RPMC_HMAC_KEY_LENGTH];
+    
+    if (calculate_hmac_key_register(keyfile, key_data, hmac_key_register)) {
+        return 1;
     }
 
-    return ret;
+    if (HMAC(EVP_sha256(), hmac_key_register, RPMC_HMAC_KEY_LENGTH, msg, signature_offset, msg + signature_offset, NULL) == NULL) {
+        msg_gerr("Could not generate HMAC signature\n");
+        return 1;
+    }
+
+    if (send_and_wait(flash, msg, msg_length)) {
+        return 1;
+    }
+
+    if (check_errors(get_extended_status(flash), msg[1])){
+        return 1;
+    }
+    
+    return 0;
+}
+
+int rpmc_write_root_key(struct flashrom_flashctx * flash, const char * const keyfile, const unsigned int counter_address)
+{
+    const unsigned int key_offset = RPMC_OP1_MSG_HEADER_LENGTH;
+    const unsigned int signature_offset = key_offset + RPMC_HMAC_KEY_LENGTH;
+    const unsigned int signature_cutoff = RPMC_SIGNATURE_LENGTH - RPMC_TRUNCATED_SIG_LENGTH;
+
+    unsigned char msg[RPMC_WRITE_ROOT_KEY_MSG_LENGTH];
+    msg[0] = flash->chip->rpmc_ctx.op1_opcode; // Opcode
+    msg[1] = 0x00; // CmdType
+    msg[2] = counter_address; // CounterAddr
+    msg[3] = 0; // Reserved
+
+    if (basic_checks(flash, counter_address)) {
+        return 1;
+    }
+
+    if (keyfile == NULL || read_buf_from_file(msg + key_offset, RPMC_HMAC_KEY_LENGTH, keyfile) != 0) {
+        return 1;
+    }
+
+    unsigned char * signature = HMAC(EVP_sha256(), msg + key_offset, RPMC_HMAC_KEY_LENGTH, msg, RPMC_OP1_MSG_HEADER_LENGTH, NULL, NULL);
+    if (signature == NULL) {
+        msg_gerr("Could not calculate HMAC signature for message\n");
+        return 1;
+    }
+
+    // need to truncate the signature a bit
+    memcpy(msg + signature_offset, signature + signature_cutoff, RPMC_TRUNCATED_SIG_LENGTH);
+
+    if (send_and_wait(flash, msg, RPMC_WRITE_ROOT_KEY_MSG_LENGTH)) {
+        return 1;
+    }
+
+    if (check_errors(get_extended_status(flash), msg[1])){
+        return 1;
+    }
+
+    msg_ginfo("Successfully wrote new root key for counter %u.\n", counter_address);
+    return 0;
 }
 
 int rpmc_update_hmac_key(struct flashrom_flashctx * flash, const char * const keyfile, const uint32_t key_data, const unsigned int counter_address)
 {
-    unsigned char hmac_key_register[RPMC_HMAC_KEY_LENGTH];
+    const unsigned int signature_offset = RPMC_OP1_MSG_HEADER_LENGTH + RPMC_KEY_DATA_LENGTH;
     unsigned char msg[RPMC_UPDATE_HMAC_KEY_MSG_LENGTH];
-    const unsigned int signature_offset = 4 + RPMC_KEY_DATA_LENGTH;
     msg[0] = flash->chip->rpmc_ctx.op1_opcode; // Opcode
     msg[1] = 0x01; // CmdType
     msg[2] = counter_address; // CounterAddr
@@ -232,130 +318,56 @@ int rpmc_update_hmac_key(struct flashrom_flashctx * flash, const char * const ke
     msg[6] = (key_data >> 8) & 0xff;
     msg[7] = key_data & 0xff;
     
-    if ((flash->chip->feature_bits & FEATURE_FLASH_HARDENING) == 0) {
-        msg_gerr("Flash hardening is not supported on this chip, aborting writing root key\n");
+    if (basic_checks(flash, counter_address)) {
         return 1;
     }
 
-    if (check_counter_in_range(flash, counter_address) != 0) {
+    if (sign_send_wait_check(flash, msg, RPMC_UPDATE_HMAC_KEY_MSG_LENGTH, signature_offset, keyfile, key_data)) {
         return 1;
     }
 
-    if (calculate_hmac_key_register(keyfile, key_data, hmac_key_register)) {
-        return 1;
-    }
-
-    unsigned char * signature = HMAC(EVP_sha256(), hmac_key_register, RPMC_HMAC_KEY_LENGTH, msg, signature_offset, msg + signature_offset, NULL);
-    if (signature == NULL) {
-        msg_gerr("Could not calculate HMAC signature\n");
-        return 1;
-    }
-
-    int ret = spi_send_command(flash, RPMC_UPDATE_HMAC_KEY_MSG_LENGTH, 0, msg, NULL);
-    if (ret)
-        return ret;
-
-    // check operation status
-    ret = poll_until_finished(flash);
-    if (ret)
-        return ret;
-
-    uint8_t status = get_extended_status(flash);
-    if (status != 0x80) {
-        ret = 1;
-
-        if (status & (1 << 1))
-            msg_gerr("Counter is not initialized.\n");
-        if (status & (1 << 2))
-            msg_gerr("Payload size incorrect, counter address out of range or signature mismatch.\n");
-    } else {
-        msg_ginfo("Successfully updated hmac key to 0x%08x for counter %u.\n", key_data, counter_address);
-    }
-
-    return ret;
+    msg_ginfo("Successfully updated hmac key to 0x%08x for counter %u.\n", key_data, counter_address);
+    return 0;
 }
 
 int rpmc_increment_counter(struct flashrom_flashctx * flash, const char * const keyfile, const uint32_t key_data, const unsigned int counter_address, const uint32_t previous_value)
 {
-    const unsigned int counter_data_offset = 4;
-    const unsigned int signature_offset = counter_data_offset + RPMC_COUNTER_LENGTH;
-    unsigned char hmac_key_register[RPMC_HMAC_KEY_LENGTH];
+    const unsigned int signature_offset = RPMC_OP1_MSG_HEADER_LENGTH + RPMC_COUNTER_LENGTH;
     unsigned char msg[RPMC_INCREMENT_MONOTONIC_COUNTER_MSG_LENGTH];
     msg[0] = flash->chip->rpmc_ctx.op1_opcode; // Opcode
     msg[1] = 0x02; // CmdType
     msg[2] = counter_address; // CounterAddr
     msg[3] = 0; // Reserved
+    // CounterData
     msg[4] = (previous_value >> 24) & 0xff;
     msg[5] = (previous_value >> 16) & 0xff;
     msg[6] = (previous_value >> 8) & 0xff;
     msg[7] = previous_value & 0xff;
 
-    if ((flash->chip->feature_bits & FEATURE_FLASH_HARDENING) == 0) {
-        msg_gerr("Flash hardening is not supported on this chip, aborting getting monotonic counter\n");
+    if (basic_checks(flash, counter_address)) {
         return 1;
     }
 
-    if (check_counter_in_range(flash, counter_address) != 0) {
+    if (sign_send_wait_check(flash, msg, RPMC_INCREMENT_MONOTONIC_COUNTER_MSG_LENGTH, signature_offset, keyfile, key_data)) {
         return 1;
     }
 
-    if (calculate_hmac_key_register(keyfile, key_data, hmac_key_register)) {
-        return 1;
-    }
-
-    unsigned char * signature = HMAC(EVP_sha256(), hmac_key_register, RPMC_HMAC_KEY_LENGTH, msg, signature_offset, msg + signature_offset, NULL);
-    if (signature == NULL) {
-        msg_gerr("Could not calculate HMAC signature\n");
-        return 1;
-    }
-
-    int ret = spi_send_command(flash, RPMC_INCREMENT_MONOTONIC_COUNTER_MSG_LENGTH, 0, msg, NULL);
-    if (ret)
-        return ret;
-
-    // check operation status
-    ret = poll_until_finished(flash);
-    if (ret)
-        return ret;
-
-    uint8_t status = get_extended_status(flash);
-    if (status != 0x80) {
-        ret = 1;
-
-        if (status & (1 << 4))
-            msg_gerr("Previous counter value does not match.\n");
-        else if (status & (1 << 3))
-            msg_gerr("Hmac key register is uninitialized.\n");
-        else if (status & (1 << 2))
-            msg_gerr("Signature mismatch, counter address out of range or incorrect payload recieved\n");
-    } else {
-        msg_ginfo("Successfully incremented counter %u.\n", counter_address);
-    }
-
-    return ret;
+    msg_ginfo("Successfully incremented counter %u.\n", counter_address);
+    return 0;
 }
 
 int rpmc_get_monotonic_counter(struct flashrom_flashctx * flash, const char * const keyfile, const uint32_t key_data, const unsigned int counter_address)
 {
-    const unsigned int tag_offset = 4;
-    const unsigned int signature_offset = tag_offset + RPMC_TAG_LENGTH;
     unsigned char hmac_key_register[RPMC_HMAC_KEY_LENGTH];
+    const unsigned int tag_offset = RPMC_OP1_MSG_HEADER_LENGTH;
+    const unsigned int signature_offset = tag_offset + RPMC_TAG_LENGTH;
     unsigned char msg[RPMC_GET_MONOTONIC_COUNTER_MSG_LENGTH];
     msg[0] = flash->chip->rpmc_ctx.op1_opcode; // Opcode
     msg[1] = 0x03; // CmdType
     msg[2] = counter_address; // CounterAddr
     msg[3] = 0; // Reserved
 
-    if ((flash->chip->feature_bits & FEATURE_FLASH_HARDENING) == 0) {
-        msg_gerr("Flash hardening is not supported on this chip, aborting getting monotonic counter\n");
-        return 1;
-    }
-
-    if (check_counter_in_range(flash, counter_address) != 0) {
-        return 1;
-    }
-
-    if (calculate_hmac_key_register(keyfile, key_data, hmac_key_register)) {
+    if (basic_checks(flash, counter_address)) {
         return 1;
     }
 
@@ -370,57 +382,42 @@ int rpmc_get_monotonic_counter(struct flashrom_flashctx * flash, const char * co
     }
     msg_gdbg("\n");
 
-    unsigned char * signature = HMAC(EVP_sha256(), hmac_key_register, RPMC_HMAC_KEY_LENGTH, msg, signature_offset, msg + signature_offset, NULL);
-    if (signature == NULL) {
-        msg_gerr("Could not calculate HMAC signature\n");
+    if (calculate_hmac_key_register(keyfile, key_data, hmac_key_register)) {
         return 1;
     }
 
-    int ret = spi_send_command(flash, RPMC_GET_MONOTONIC_COUNTER_MSG_LENGTH, 0, msg, NULL);
-    if (ret)
-        return ret;
+    if (HMAC(EVP_sha256(), hmac_key_register, RPMC_HMAC_KEY_LENGTH, msg, signature_offset, msg + signature_offset, NULL) == NULL) {
+        msg_gerr("Could not generate HMAC signature\n");
+        return 1;
+    }
 
-    // check operation status
-    ret = poll_until_finished(flash);
-    if (ret)
-        return ret;
+    if (send_and_wait(flash, msg, RPMC_GET_MONOTONIC_COUNTER_MSG_LENGTH)) {
+        return 1;
+    }
 
-    struct rpmc_status_register status;
+    struct rpmc_status_register status;    
+    if (get_extended_status_long(flash, &status, msg + tag_offset, hmac_key_register)) {
+        return 1;
+    }
     
-    if (get_extended_status_long(flash, &status)) {
+    if (check_errors(status.status, msg[1])) {
         return 1;
-    }
-
-    if (status.status != 0x80) {
-        if (status.status & (1 << 3))
-            msg_gerr("Hmac key register is uninitialized.\n");
-        else if (status.status & (1 << 2))
-            msg_gerr("Signature mismatch, counter address out of range, cmdtype out of range or incorrect payload size.\n");
-        
-        return 1;
-    }
-
-    for (size_t i = 0; i < RPMC_TAG_LENGTH; i++) {
-        if (msg[tag_offset + i] != status.tag[i]) {
-            msg_gwarn("Tag doesn't match counter might be false\n");
-            ret = 1;
-        }
     }
 
     msg_ginfo("Returned counter value %u for counter %u\n", status.counter_data, counter_address);
-    return ret;
+    return 0;
 }
 
 int rpmc_read_data(struct flashrom_flashctx * flash)
 {
-    if ((flash->chip->feature_bits & FEATURE_FLASH_HARDENING) == 0) {
-        msg_gerr("Flash hardening is not supported on this chip, aborting getting data\n");
+    // hack around not having a counter address
+    if (basic_checks(flash, 0)) {
         return 1;
     }
 
     struct rpmc_status_register status;
 
-    if (get_extended_status_long(flash, &status)) {
+    if (get_extended_status_long(flash, &status, NULL, NULL)) {
         return 1;
     }
 
